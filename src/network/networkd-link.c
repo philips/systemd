@@ -237,6 +237,8 @@ static int link_enter_set_routes(Link *link) {
 
         if (link->dhcp_lease) {
                 _cleanup_route_free_ Route *route = NULL;
+                _cleanup_route_free_ Route *route_host = NULL;
+                struct in_addr netmask;
                 struct in_addr gateway;
 
                 r = sd_dhcp_lease_get_router(link->dhcp_lease, &gateway);
@@ -251,6 +253,40 @@ static int link_enter_set_routes(Link *link) {
                         log_error_link(link, "Could not allocate route: %s",
                                        strerror(-r));
                         return r;
+                }
+
+                r = sd_dhcp_lease_get_netmask(link->dhcp_lease, &netmask);
+                if (r < 0) {
+                        log_warning_link(link, "DHCP error: no netmask: %s",
+                                         strerror(-r));
+                        return r;
+                }
+
+                prefixlen = net_netmask_to_prefixlen(&netmask);
+
+                // If the dhcp netmask is 255.255.255.255 we need to create a
+                // route to the gateway. This will need to be expanded to look
+                // at the existing routes and a host route if the gw is
+                // outside the current table.
+                if prefixlen == 32 {
+                        r = route_new_dynamic(&route_host);
+                        if (r < 0) {
+                                log_error_link(link, "Could not allocate route: %s",
+                                               strerror(-r));
+                                return r;
+                        }
+
+                        route_host->family = AF_INET;
+                        route_host->dst_addr.in = gateway;
+                        route_host->dst_prefixlen = 32;
+
+                        r = route_configure(route_host, link, &route_handler);
+                        if (r < 0) {
+                                log_warning_link(link,
+                                                 "could not set routes: %s", strerror(-r));
+                                link_enter_failed(link);
+                                return r;
+                        }
                 }
 
                 route->family = AF_INET;
